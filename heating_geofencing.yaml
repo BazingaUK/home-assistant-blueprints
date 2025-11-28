@@ -1,0 +1,89 @@
+
+blueprint:
+  name: Heating: Geofencing Notification
+  description: Adjust thermostat and notify when leaving or approaching home based on distance sensor, with safeguards.
+  domain: automation
+  input:
+    distance_sensor:
+      name: Distance Sensor
+      description: Sensor that reports distance to home (in meters)
+      selector:
+        entity:
+          domain: sensor
+    thermostat:
+      name: Thermostat
+      description: Climate entity to control
+      selector:
+        entity:
+          domain: climate
+    notify_target:
+      name: Notify Service
+      description: Notification service (e.g., notify.mobile_app_yourphone or notify.everyone)
+      selector:
+        text:
+    away_temp:
+      name: Away Temperature
+      description: Temperature to set when leaving home
+      default: 15
+      selector:
+        number:
+          min: 5
+          max: 25
+          unit_of_measurement: °C
+    threshold:
+      name: Distance Threshold
+      description: Distance in meters to consider "home"
+      default: 300
+      selector:
+        number:
+          min: 50
+          max: 1000
+trigger:
+  - platform: numeric_state
+    entity_id: !input distance_sensor
+    above: !input threshold
+    id: leaving-home
+  - platform: numeric_state
+    entity_id: !input distance_sensor
+    below: !input threshold
+    id: approaching-home
+condition: []
+action:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: leaving-home
+          - condition: template
+            value_template: >
+              {{ state_attr(!input thermostat, 'temperature') != !input away_temp }}
+        sequence:
+          - service: scene.create
+            data:
+              scene_id: temporary_thermostat_snapshot
+              snapshot_entities:
+                - !input thermostat
+          - delay: "00:00:03"
+          - service: climate.set_temperature
+            target:
+              entity_id: !input thermostat
+            data:
+              temperature: !input away_temp
+          - service: !input notify_target
+            data:
+              title: "Left Home"
+              message: "Heating mode set to AWAY"
+      - conditions:
+          - condition: trigger
+            id: approaching-home
+          - condition: template
+            value_template: >
+              {{ 'scene.temporary_thermostat_snapshot' in states }}
+        sequence:
+          - service: scene.apply
+            data:
+              scene_id: temporary_thermostat_snapshot
+          - service: !input notify_target
+            data:
+              title: "At Home"
+              message: "Heating schedule resumed"
+mode: single
