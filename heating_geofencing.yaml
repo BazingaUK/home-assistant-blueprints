@@ -1,26 +1,34 @@
 
 blueprint:
-  name: "Heating Geofencing Notification"
-  description: Adjust thermostat and notify when leaving or approaching home based on distance sensor, with safeguards.
+  name: "Heating: Geofencing Notification (with fallback)"
+  description: >
+    Adjust thermostat and notify when leaving or approaching home based on a distance sensor.
+    - Leaving home: snapshot current thermostat state, set Away temperature, notify.
+    - Approaching home: if snapshot scene exists, apply it; otherwise set a default Home temperature and notify.
+    - Safeguards: only set Away temp if already not equal; only apply scene if it exists.
   domain: automation
+
   input:
     distance_sensor:
       name: Distance Sensor
-      description: Sensor that reports distance to home (in meters)
+      description: Sensor that reports your distance to home (in meters)
       selector:
         entity:
           domain: sensor
+
     thermostat:
       name: Thermostat
       description: Climate entity to control
       selector:
         entity:
           domain: climate
+
     notify_target:
       name: Notify Service
-      description: Notification service (e.g., notify.mobile_app_yourphone or notify.everyone)
+      description: Notification service (e.g., notify.everyone or notify.mobile_app_<device>)
       selector:
         text:
+
     away_temp:
       name: Away Temperature
       description: Temperature to set when leaving home
@@ -28,62 +36,147 @@ blueprint:
       selector:
         number:
           min: 5
-          max: 25
-          unit_of_measurement: °C
+          max: 30
+          step: 0.5
+          unit_of_measurement: "°C"
+
     threshold:
-      name: Distance Threshold
-      description: Distance in meters to consider "home"
+      name: Distance Threshold (m)
+      description: Crossing above = leaving; crossing below = approaching
       default: 300
       selector:
         number:
           min: 50
-          max: 1000
+          max: 5000
+          step: 10
+
+    home_temp:
+      name: Home Temperature (fallback)
+      description: Used when the snapshot scene is missing on approach
+      default: 20
+      selector:
+        number:
+          min: 5
+          max: 30
+          step: 0.5
+          unit_of_measurement: "°C"
+
+    restore_hvac_mode:
+      name: Restore HVAC Mode on approach (optional)
+      description: If provided, sets this HVAC mode on approach (e.g., heat, auto)
+      default: ""
+      selector:
+        text:
+
+    snapshot_scene_id:
+      name: Snapshot Scene ID
+      description: ID to store/apply the temporary scene (no 'scene.' prefix)
+      default: temporary_thermostat_snapshot
+      selector:
+        text:
+
 trigger:
   - platform: numeric_state
     entity_id: !input distance_sensor
     above: !input threshold
     id: leaving-home
+
   - platform: numeric_state
     entity_id: !input distance_sensor
     below: !input threshold
     id: approaching-home
+
 condition: []
+
 action:
   - choose:
+      # ======== Leaving Home ========
       - conditions:
           - condition: trigger
             id: leaving-home
+          # Only act if thermostat isn't already set to away_temp
           - condition: template
             value_template: >
-              {{ state_attr(!input thermostat, 'temperature') != !input away_temp }}
+              {{ state_attr( ( !input thermostat ), 'temperature') != ( !input away_temp ) }}
         sequence:
+          # Snapshot current thermostat state into a temporary scene
           - service: scene.create
             data:
-              scene_id: temporary_thermostat_snapshot
+              scene_id: !input snapshot_scene_id
               snapshot_entities:
                 - !input thermostat
+
+          # Small delay to make sure scene is created
           - delay: "00:00:03"
+
+          # Set Away temperature
           - service: climate.set_temperature
             target:
               entity_id: !input thermostat
             data:
               temperature: !input away_temp
+
+          # Notify
           - service: !input notify_target
             data:
               title: "Left Home"
-              message: "Heating mode set to AWAY"
+              message: "Heating set to AWAY ({{ !input away_temp }}°C). Snapshot saved as '{{ !input snapshot_scene_id }}'."
+
+      # ======== Approaching Home ========
       - conditions:
           - condition: trigger
             id: approaching-home
-          - condition: template
-            value_template: >
-              {{ 'scene.temporary_thermostat_snapshot' in states }}
         sequence:
-          - service: scene.apply
-            data:
-              scene_id: temporary_thermostat_snapshot
-          - service: !input notify_target
-            data:
-              title: "At Home"
-              message: "Heating schedule resumed"
+          - choose:
+              # Branch A: Scene exists -> apply it
+              - conditions:
+                  - condition: template
+                    value_template: >
+                      {{ ('scene.' ~ ( !input snapshot_scene_id )) in states }}
+                sequence:
+                  - service: scene.apply
+                    data:
+                      scene_id: !input snapshot_scene_id
+
+                  # Optionally restore HVAC mode if provided
+                  - condition: template
+                    value_template: >
+                      {{ ( !input restore_hvac_mode ) | trim != '' }}
+                  - service: climate.set_hvac_mode
+                    target:
+                      entity_id: !input thermostat
+                    data:
+                      hvac_mode: !input restore_hvac_mode
+
+                  - service: !input notify_target
+                    data:
+                      title: "At Home"
+                      message: "Heating schedule resumed by applying snapshot '{{ !input snapshot_scene_id }}'."
+
+              # Branch B: Scene missing -> fallback
+              - conditions:
+                  - condition: template
+                    value_template: >
+                      {{ ('scene.' ~ ( !input snapshot_scene_id )) not in states }}
+                sequence:
+                  - service: climate.set_temperature
+                    target:
+                      entity_id: !input thermostat
+                    data:
+                      temperature: !input home_temp
+
+                  # Optionally restore HVAC mode if provided
+                  - condition: template
+                    value_template: >
+                      {{ ( !input restore_hvac_mode ) | trim != '' }}
+                  - service: climate.set_hvac_mode
+                    target:
+                      entity_id: !input thermostat
+                    data:
+                      hvac_mode: !input restore_hvac_mode
+
+                  - service: !input notify_target
+                    data:
+                      title: "At Home (Fallback)"
+                      message: "Snapshot missing—set heating to {{ !input home_temp }}°C{{ ' and mode ' ~ !input restore_hvac_mode if ( !input restore_hvac_mode ) | trim != '' else '' }}."
 mode: single
