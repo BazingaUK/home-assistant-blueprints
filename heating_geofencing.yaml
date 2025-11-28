@@ -1,6 +1,6 @@
 
 blueprint:
-  name: "Heating: Geofencing Notification"
+  name: "Heating Geofencing Notification"
   description: Adjust thermostat and notify when leaving or approaching home based on distance sensor, with safeguards.
   domain: automation
   input:
